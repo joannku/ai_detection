@@ -206,13 +206,18 @@ def process_entries(df_to_score: pd.DataFrame) -> pd.DataFrame:
 
 
 def merge_with_existing(new_rows: pd.DataFrame) -> pd.DataFrame:
-    """Append `new_rows` to readability.csv, deduping on JournalUniqueID."""
-    if ENTRY_CSV.exists() and not new_rows.empty:
+    """Append `new_rows` to readability.csv, deduping on JournalUniqueID.
+
+    On a pure cache hit (`new_rows` is empty and the CSV already exists),
+    we skip the rewrite entirely so the on-disk file is byte-stable across
+    cache-hit runs.
+    """
+    if new_rows.empty and ENTRY_CSV.exists():
+        return pd.read_csv(ENTRY_CSV)
+    if ENTRY_CSV.exists():
         prior = pd.read_csv(ENTRY_CSV)
         combined = (pd.concat([prior, new_rows], ignore_index=True)
                       .drop_duplicates("JournalUniqueID", keep="last"))
-    elif ENTRY_CSV.exists():
-        combined = pd.read_csv(ENTRY_CSV)
     else:
         combined = new_rows
     combined.to_csv(ENTRY_CSV, index=False)
