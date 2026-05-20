@@ -1,0 +1,97 @@
+# --- Data files ---------------------------------------------------------
+# All CSVs are derived (pipeline outputs) or contain participant data and
+# should not be tracked. Source-of-truth ratings and the demographics
+# Qualtrics exports live elsewhere and are versioned out-of-band.
+*.csv
+
+# Compiled / draft PDFs (e.g. paper_drafts/AI_Detection*.pdf, Overleaf
+# downloads). Figure PDFs that are paper assets are exempted below.
+*.pdf
+!overleaf_paper/**/*.pdf
+
+# --- Secrets ------------------------------------------------------------
+# .env files commonly hold API keys (e.g. gpt_zero_api, pangram_api).
+# NEVER commit these.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build / packaging artefacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Test / coverage caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- Jupyter ------------------------------------------------------------
+.ipynb_checkpoints/
+
+# --- IDEs / editors -----------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- macOS --------------------------------------------------------------
+.DS_Store
+
+# --- LaTeX build artefacts ---------------------------------------------
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+
+# --- Project-specific ---------------------------------------------------
+# Qualtrics exports (raw rater demographics) - timestamped, not for VCS.
+input/demographics/Demographics_*.csv
+Demographics_*.csv
+
+# Compiled paper drafts (e.g. AI_Detection.pdf, AI_Detection (4).pdf, ...).
+paper_drafts/
+
+# Raw rater workbooks and the per-rater label files. These contain
+# participant journal text and labelled judgements; treat as private data.
+ratings/
+*.xlsx
+
+# Older / exploratory scripts and copies of raw data.
+draft/
+
+# Overleaf paper
+overleaf_paper/
+
+# Output, input
+input/
+output/
+
+# Docs
+docs
