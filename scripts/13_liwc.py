@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LIWC Processing Script for Unity Scheduler
+LIWC Processing Script
 
 This script automates the daily processing of new entries through LIWC-22 CLI:
 1. Re-triggers collate_data.py to get latest collated data
@@ -8,8 +8,6 @@ This script automates the daily processing of new entries through LIWC-22 CLI:
 3. Processes new entries using LIWC-22 CLI
 4. Exports results to CSV with incremental updates
 
-Author: Unity Scheduler Team
-Date: 2024
 """
 
 import pandas as pd
@@ -27,7 +25,9 @@ import argparse
 import shutil
 import time
 import platform
-import start_liwc_server
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+import start_liwc_server  # type: ignore[import-not-found]  # noqa: E402  (from ../tools)
 
 # Setup logging
 logging.basicConfig(
