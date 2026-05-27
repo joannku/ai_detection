@@ -141,8 +141,7 @@ def main():
         all_results.append(evaluate(
             "XGBoost", build_pipeline(
                 XGBClassifier(n_estimators=200, scale_pos_weight=n_neg / n_pos,
-                              random_state=SEED, eval_metric="logloss",
-                              use_label_encoder=False),
+                              random_state=SEED, eval_metric="logloss"),
                 needs_scaling=False),
             X, y, groups, outer_cv,
             param_grid={

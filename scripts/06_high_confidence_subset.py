@@ -70,6 +70,39 @@ def build_subset(df: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
 
+def _valid_votes_block(title: str, df: pd.DataFrame) -> list[str]:
+    """Coverage stats on `valid_votes` (= num_ai + num_human, i.e. ratings
+    after invalid ratings are excluded).
+
+    With 1 or 2 valid ratings the 80% agreement threshold is trivially
+    satisfied (the only option is 100% agreement), so we explicitly flag
+    those rows."""
+    vv = df["valid_votes"]
+    n = len(df)
+    n_trivial = int((vv <= 2).sum())
+    lines = [
+        "",
+        title,
+        f"  N entries        : {n:,}",
+        f"  Mean (SD)        : {vv.mean():.2f} ({vv.std():.2f})",
+        f"  Median [IQR]     : {vv.median():.0f} "
+        f"[{vv.quantile(0.25):.0f}–{vv.quantile(0.75):.0f}]",
+        f"  Min / Max        : {int(vv.min())} / {int(vv.max())}",
+        "  Distribution:",
+    ]
+    for k, count in vv.value_counts().sort_index().items():
+        marker = "  (80% threshold trivial)" if int(k) <= 2 else ""
+        lines.append(
+            f"    {int(k)} valid rater(s): "
+            f"{int(count):>5,} entries ({count/n:.1%}){marker}"
+        )
+    lines.append(
+        f"  Entries with <= 2 valid ratings: "
+        f"{n_trivial:,} ({n_trivial/n:.1%})"
+    )
+    return lines
+
+
 def write_summary(full_df, subset_df, out_path):
     n_ai = (subset_df["final_label"] == "ai").sum()
     n_human = (subset_df["final_label"] == "human").sum()
@@ -96,6 +129,13 @@ def write_summary(full_df, subset_df, out_path):
     for pct in [0.80, 0.85, 0.90, 0.95, 1.00]:
         n = (subset_df["agree_pct"] >= pct).sum()
         lines.append(f"  >= {pct:.0%}: {n:,}")
+
+    lines += _valid_votes_block(
+        "Valid-rater coverage (full valid pool)", full_df
+    )
+    lines += _valid_votes_block(
+        "Valid-rater coverage (high-confidence subset)", subset_df
+    )
 
     lines += [
         "",

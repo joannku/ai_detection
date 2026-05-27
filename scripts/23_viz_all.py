@@ -76,14 +76,43 @@ FEATURE_DISPLAY_NAMES = {
     "bleu_participant": "BLEU (Participant)",
 }
 
-VIOLIN_FEATURES = [
-    "coherence", "style_similarity",
-    "read_flesch_reading_ease", "read_coleman_liau_index",
-    "nli_consistency_score", "nli_entailment_rate",
-    "word_count", "liwc_Comma",
-    "liwc_Dic", "liwc_article",
-    "liwc_ppron", "liwc_focuspresent",
-]
+def top_features_by_mean_rank(n: int = 15) -> list[str]:
+    """Return the top-n features by mean SHAP rank across the five
+    meta-classifiers, in the same vertical order used by Figure 5.
+
+    This couples the violin grid (Figure 7) to the cross-model heatmap
+    (Figure 5) so every feature shown as a distribution is also visible
+    in the heatmap, in the same row order. Avoids the previous problem
+    where the violin grid had a hand-curated list that drifted from the
+    actual top features (and silently lost panels when a feature was
+    excluded upstream, e.g. liwc_Dic).
+
+    Falls back to a curated list if META_IMPORTANCE_CSV is missing or
+    has no shap_ columns yet (e.g. before 21_meta_classifiers.py has
+    been run).
+    """
+    fallback = [
+        "liwc_article", "read_coleman_liau_index", "liwc_Comma",
+        "coherence", "sentence_count", "character_count",
+        "liwc_BigWords", "liwc_Cognition", "liwc_verb",
+        "liwc_adverb", "read_syllable_count", "style_similarity",
+        "liwc_auxverb", "liwc_allure", "liwc_det",
+    ]
+    if not META_IMPORTANCE_CSV.exists():
+        print("  [warning] meta_feature_importance.csv missing; "
+              "using fallback violin list")
+        return fallback[:n]
+    imp = pd.read_csv(META_IMPORTANCE_CSV)
+    shap_cols = [c for c in imp.columns if c.startswith("shap_")]
+    if not shap_cols:
+        print("  [warning] no shap_ columns in meta_feature_importance.csv; "
+              "using fallback violin list")
+        return fallback[:n]
+    ranks = pd.DataFrame({"feature": imp["feature"]})
+    for c in shap_cols:
+        ranks[c] = imp[c].rank(method="min", ascending=False).astype(int)
+    ranks["mean_rank"] = ranks[shap_cols].mean(axis=1)
+    return ranks.nsmallest(n, "mean_rank")["feature"].tolist()
 
 BOUNDARY_PAIRS = [
     ("coherence", "style_similarity"),
@@ -109,10 +138,21 @@ def display_name(feat):
 
 # ── 1. Violin plots ────────────────────────────────────────────────
 
-def plot_violins(X, labels):
-    feats = [f for f in VIOLIN_FEATURES if f in X.columns]
+def plot_violins(X, labels, feats=None):
+    """Violin grid of the top-N meta-features, ordered by mean SHAP rank
+    across the five meta-classifiers (same order as Figure 5).
+
+    `feats` may be passed explicitly to override the default top-15.
+    Anything not present in `X.columns` is silently dropped.
+    """
+    if feats is None:
+        feats = top_features_by_mean_rank(15)
+    feats = [f for f in feats if f in X.columns]
     n = len(feats)
-    cols = 3
+    # 5 columns × 3 rows for n=15. Wider, landscape-oriented layout that
+    # mirrors the row order of Figure 5 left-to-right, top-to-bottom and
+    # is well suited to a full-text-width figure in the paper.
+    cols = 5
     rows = (n + cols - 1) // cols
 
     HUMAN = "#4C9BE8"
@@ -131,7 +171,9 @@ def plot_violins(X, labels):
         "axes.edgecolor": "#3f3f44",
         "axes.linewidth": 0.9,
     }):
-        fig, axes = plt.subplots(rows, cols, figsize=(8.8, 2.55 * rows))
+        # Width scales with column count to keep each panel ~2.9 in wide,
+        # matching the per-panel size of the previous 3-col layout.
+        fig, axes = plt.subplots(rows, cols, figsize=(2.93 * cols, 2.55 * rows))
         axes = axes.flatten()
 
         legend_handles = None

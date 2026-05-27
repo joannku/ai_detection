@@ -24,11 +24,13 @@ REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
 LIWC_META_COLS = {"Row ID", "Segment"}
 
 # Exclude LIWC summary variables that use proprietary internal algorithms
-# (Analytic, Clout, Authentic, Tone) and word-count proxies already captured
-# by dedicated length features (WC, WPS).  `BigWords` is *kept* because it
-# measures the proportion of long words, which our length features and
-# readability metrics do not capture directly.
-LIWC_EXCLUDE = {"Analytic", "Clout", "Authentic", "Tone", "WC", "WPS"}
+# (Analytic, Clout, Authentic, Tone) and length / dictionary-coverage proxies
+# already captured by dedicated length features (WC, WPS) or that are not
+# word categories at all (Dic = % of tokens matched by the LIWC dictionary).
+# Matches the words-only LASSO exclusion set in scripts/15_analyze_liwc.py.
+# `BigWords` is *kept* because it measures the proportion of long words,
+# which our length features and readability metrics do not capture directly.
+LIWC_EXCLUDE = {"Analytic", "Clout", "Authentic", "Tone", "WC", "WPS", "Dic"}
 
 
 def load_high_confidence():

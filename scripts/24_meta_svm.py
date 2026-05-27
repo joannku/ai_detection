@@ -457,9 +457,47 @@ def main():
         combined_cv.to_csv(combined_cv_path, index=False)
         print(f"  Updated combined CV results with SVM")
 
-    print(f"\n{'='*60}")
-    print(f"✓ All SVM outputs saved to {REVIEWS_OUTPUT}")
-    print(f"{'='*60}")
+    # Pretty-print the SVM row in the same precision as tab:meta_cv in
+    # 5results.tex (AUC at 4 dp, the rest at 3 dp). Copy-paste straight
+    # into the paper table.
+    r = cv_df.iloc[0]
+    def _ms(key, dp):
+        return f"{r[f'{key}_mean']:.{dp}f} \u00b1 {r[f'{key}_std']:.{dp}f}"
+    row_label = "Linear SVM"
+    cells = [
+        row_label,
+        _ms("roc_auc",   4),
+        _ms("accuracy",  3),
+        _ms("f1",        3),
+        _ms("precision", 3),
+        _ms("recall",    3),
+    ]
+    print(f"\n{'='*72}")
+    print("Linear SVM row (paste into Table 5)")
+    print(f"{'='*72}")
+    headers = ["Model", "AUC", "Accuracy", "F1", "Precision", "Recall"]
+    widths = [max(len(h), len(c)) for h, c in zip(headers, cells)]
+    print("  " + "  ".join(f"{h:<{w}}" for h, w in zip(headers, widths)))
+    print("  " + "  ".join(f"{c:<{w}}" for c, w in zip(cells, widths)))
+    # Markdown table row, ready to drop into a Google Doc / Markdown paper.
+    print("\n  Markdown:")
+    print("  | " + " | ".join(cells) + " |")
+    # LaTeX table row, ready to drop into 5results.tex tab:meta_cv (.4f / .3f
+    # styling matches the existing rows in the file).
+    latex_cells = [
+        row_label,
+        f"{r['roc_auc_mean']:.4f} $\\pm$ {r['roc_auc_std']:.4f}",
+        f"{r['accuracy_mean']:.3f} $\\pm$ {r['accuracy_std']:.3f}",
+        f"{r['f1_mean']:.3f} $\\pm$ {r['f1_std']:.3f}",
+        f"{r['precision_mean']:.3f} $\\pm$ {r['precision_std']:.3f}",
+        f"{r['recall_mean']:.3f} $\\pm$ {r['recall_std']:.3f}",
+    ]
+    print("\n  LaTeX:")
+    print("  " + " & ".join(latex_cells) + r" \\")
+
+    print(f"\n{'='*72}")
+    print(f"\u2713 All SVM outputs saved to {REVIEWS_OUTPUT}")
+    print(f"{'='*72}")
 
 
 if __name__ == "__main__":
