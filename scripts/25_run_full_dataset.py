@@ -27,8 +27,20 @@ try:
 except ImportError:
     HAS_XGB = False
 
+# Feature-set variant: "orig" | "sw" | "drop" | "drop_nowc". Selects the full-dataset merged
+# matrix and suffixes the CV results output.
+VARIANT = "drop"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+
+
+def variant_name(filename: str) -> str:
+    """Insert the variant SUFFIX before a filename's extension."""
+    stem, dot, ext = filename.rpartition(".")
+    return f"{stem}{SUFFIX}.{ext}" if dot else f"{filename}{SUFFIX}"
+
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-META_FEATURES_FULL_CSV = _REPO_ROOT / "output" / "merge_features_full" / "meta_features_full.csv"
+META_FEATURES_FULL_CSV = _REPO_ROOT / "output" / "merge_features_full" / f"meta_features_full{SUFFIX}.csv"
 REVIEWS_OUTPUT = _REPO_ROOT / "output" / "run_full_dataset"
 REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
 SEED = 42
@@ -42,7 +54,7 @@ SCORING = {
     "recall": "recall",
 }
 
-DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "bleu_participant"]
+DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "nli_segmentation", "bleu_participant"]
 
 
 def load_data():
@@ -98,6 +110,7 @@ def evaluate(name, pipeline, X, y, groups, outer_cv, param_grid):
 
 
 def main():
+    print(f"Variant: {VARIANT}  ->  reading {META_FEATURES_FULL_CSV.name}")
     X, y, groups, feature_cols = load_data()
     outer_cv = StratifiedGroupKFold(n_splits=CV_FOLDS)
 
@@ -160,7 +173,7 @@ def main():
     ))
 
     cv_df = pd.DataFrame(all_results)
-    out_path = REVIEWS_OUTPUT / "full_cv_results.csv"
+    out_path = REVIEWS_OUTPUT / variant_name("full_cv_results.csv")
     cv_df.to_csv(out_path, index=False)
 
     print(f"\n{'='*60}")

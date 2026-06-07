@@ -116,12 +116,13 @@ CHECKS: dict[str, StepCheck] = {
         # participant_bleu is participant-keyed; bleu_by_label is aggregate.
         # No journal-coverage check — bleu is computed at participant level.
     ),
+    # Canonical pipeline drops entries with <2 sentences, so outputs carry the
+    # _drop suffix and are a *subset* (no journal-coverage check).
     "09_nli_consistency": StepCheck(
         files=[
-            "output/nli_consistency/nli_consistency.csv",
-            "output/nli_consistency/nli_consistency_by_label.csv",
+            "output/nli_consistency_drop/nli_consistency_drop.csv",
+            "output/nli_consistency_drop/nli_consistency_drop_by_label.csv",
         ],
-        coverage=("output/nli_consistency/nli_consistency.csv", "JournalUniqueID"),
     ),
     "10_readability": StepCheck(
         files=[
@@ -131,11 +132,11 @@ CHECKS: dict[str, StepCheck] = {
         coverage=("output/readability/readability.csv", "JournalUniqueID"),
     ),
     "11_generate_features": StepCheck(
-        files=["output/generate_features/features.csv"],
-        coverage=("output/generate_features/features.csv", "JournalUniqueID"),
+        files=["output/generate_features_drop/features_drop.csv"],
+        # Subset by design (drops <2-sentence entries) — no coverage check.
     ),
     "12_analyze_features": StepCheck(
-        files=["output/analyze_features/pvals.csv"],
+        files=["output/analyze_features/pvals_drop.csv"],
     ),
     "13_liwc": StepCheck(
         files=["output/liwc/liwc.csv"],
@@ -163,59 +164,59 @@ CHECKS: dict[str, StepCheck] = {
     ),
     "18_automl_shap": StepCheck(
         files=[
-            "output/automl_shap/all_features.csv",
-            "output/automl_shap/shap_summary.png",
-            "output/automl_shap/shap_importance.csv",
+            "output/automl_shap/all_features_drop.csv",
+            "output/automl_shap/shap_summary_drop.png",
+            "output/automl_shap/shap_importance_drop.csv",
         ],
     ),
     "19_merge_features": StepCheck(
-        files=["output/merge_features/meta_features.csv"],
+        files=["output/merge_features/meta_features_drop.csv"],
         # meta_features is the high-confidence subset — not all journals.
     ),
     "20_merge_features_full": StepCheck(
-        files=["output/merge_features_full/meta_features_full.csv"],
+        files=["output/merge_features_full/meta_features_full_drop.csv"],
         # All valid (non-excluded) entries — also a subset of all journals.
     ),
     "21_meta_classifiers": StepCheck(
         files=[
-            "output/meta_classifiers/meta_lasso_coeffs.csv",
-            "output/meta_classifiers/meta_tree_rules.txt",
-            "output/meta_classifiers/meta_cv_results.csv",
-            "output/meta_classifiers/meta_feature_importance.csv",
-            "output/meta_classifiers/decision_tree.png",
+            "output/meta_classifiers/meta_lasso_coeffs_drop.csv",
+            "output/meta_classifiers/meta_tree_rules_drop.txt",
+            "output/meta_classifiers/meta_cv_results_drop.csv",
+            "output/meta_classifiers/meta_feature_importance_drop.csv",
+            "output/meta_classifiers/decision_tree_drop.png",
         ],
     ),
     "22_plot_decision_tree": StepCheck(
-        files=["output/plot_decision_tree/decision_tree.png"],
+        files=["output/plot_decision_tree/decision_tree_drop.png"],
     ),
     "23_viz_all": StepCheck(
         files=[
-            "output/viz_all/violin_distributions.png",
-            "output/viz_all/decision_boundary_pca.png",
-            "output/viz_all/decision_boundary_pairs.png",
-            "output/viz_all/shap_comparison.png",
+            "output/viz_all/violin_distributions_drop.png",
+            "output/viz_all/decision_boundary_pca_drop.png",
+            "output/viz_all/decision_boundary_pairs_drop.png",
+            "output/viz_all/shap_comparison_drop.png",
         ],
     ),
     "24_meta_svm": StepCheck(
         files=[
-            "output/meta_svm/svm_cv_results.csv",
-            "output/meta_svm/svm_coefficients.csv",
-            "output/meta_svm/svm_margin_flags.csv",
-            "output/meta_svm/svm_margin_histogram.png",
-            "output/meta_svm/svm_boundary_pca.png",
-            "output/meta_svm/svm_boundary_pairs.png",
-            "output/meta_svm/svm_shap_importance.csv",
-            "output/meta_svm/shap_summary_svm.png",
-            "output/meta_svm/shap_values_svm.csv",
+            "output/meta_svm/svm_cv_results_drop.csv",
+            "output/meta_svm/svm_coefficients_drop.csv",
+            "output/meta_svm/svm_margin_flags_drop.csv",
+            "output/meta_svm/svm_margin_histogram_drop.png",
+            "output/meta_svm/svm_boundary_pca_drop.png",
+            "output/meta_svm/svm_boundary_pairs_drop.png",
+            "output/meta_svm/svm_shap_importance_drop.csv",
+            "output/meta_svm/shap_summary_svm_drop.png",
+            "output/meta_svm/shap_values_svm_drop.csv",
         ],
     ),
     "25_run_full_dataset": StepCheck(
-        files=["output/run_full_dataset/full_cv_results.csv"],
+        files=["output/run_full_dataset/full_cv_results_drop.csv"],
     ),
     "26_permutation_test": StepCheck(
         files=[
-            "output/permutation_test/permutation_test_results.csv",
-            "output/permutation_test/permutation_test_summary.txt",
+            "output/permutation_test/permutation_test_results_drop.csv",
+            "output/permutation_test/permutation_test_summary_drop.txt",
         ],
     ),
 }

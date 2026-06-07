@@ -17,6 +17,19 @@ ROOT = Path(__file__).resolve().parent.parent
 REVIEWS_OUTPUT = ROOT / "output" / "merge_features_full"
 REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
 
+# Feature-set variant (see 19_merge_features.py for the full description).
+# Controls which coherence/style + NLI inputs are read and the suffix applied
+# to the merged output.
+#   "orig" | "sw" | "drop" | "drop_nowc"
+VARIANT = "drop"
+
+# "drop_nowc" reuses the "drop" per-entry inputs (data suffix "_drop") but
+# removes word_count and writes a distinct "_drop_nowc" output.
+_DATA_VARIANT = "drop" if VARIANT == "drop_nowc" else VARIANT
+DATA_SUFFIX = "" if _DATA_VARIANT == "orig" else f"_{_DATA_VARIANT}"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+EXCLUDE_WC = VARIANT == "drop_nowc"
+
 LIWC_META_COLS = {"Row ID", "Segment"}
 
 # Exclude LIWC summary variables that use proprietary internal algorithms
@@ -44,16 +57,21 @@ def load_all_valid():
 
 
 def load_coherence_style():
-    path = ROOT / "output" / "generate_features" / "features.csv"
+    path = ROOT / "output" / f"generate_features{DATA_SUFFIX}" / f"features{DATA_SUFFIX}.csv"
     if not path.exists():
-        print("WARNING: features.csv not found — coherence & style similarity will be missing.")
+        print(f"WARNING: {path.name} not found — coherence & style similarity will be missing.")
         return None
     df = pd.read_csv(path)
     df = df.drop_duplicates(subset=["JournalUniqueID"], keep="first")
+    # Normalise variant-suffixed metric names back to canonical names.
+    df = df.rename(columns={
+        f"coherence{DATA_SUFFIX}": "coherence",
+        f"style_similarity{DATA_SUFFIX}": "style_similarity",
+    })
     cols = ["JournalUniqueID", "coherence", "style_similarity",
             "word_count", "sentence_count", "character_count"]
     present = [c for c in cols if c in df.columns]
-    print(f"Coherence/style: loaded {len(df)} entries")
+    print(f"Coherence/style: loaded {len(df)} entries from {path.name}")
     return df[present]
 
 
@@ -84,9 +102,19 @@ def load_readability():
 
 
 def load_nli():
-    path = ROOT / "output" / "nli_consistency" / "nli_consistency.csv"
+    path = ROOT / "output" / f"nli_consistency{DATA_SUFFIX}" / f"nli_consistency{DATA_SUFFIX}.csv"
     df = pd.read_csv(path)
     df = df.drop(columns=["final_label"], errors="ignore")
+    # Normalise variant column names back to the canonical schema.
+    rename_map = {
+        f"consistency_score{DATA_SUFFIX}": "consistency_score",
+        f"contradiction_rate{DATA_SUFFIX}": "contradiction_rate",
+        f"entailment_rate{DATA_SUFFIX}": "entailment_rate",
+        f"neutral_rate{DATA_SUFFIX}": "neutral_rate",
+        "n_windows": "n_sentences",
+        "n_adj_pairs": "n_pairs",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
     nli_cols = [c for c in df.columns if c != "JournalUniqueID"]
     df = df.rename(columns={c: f"nli_{c}" for c in nli_cols})
     print(f"NLI consistency: {len(df)} entries, {len(nli_cols)} features")
@@ -104,6 +132,7 @@ def load_bleu():
 
 def main():
     REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
+    print(f"Variant: {VARIANT} (output suffix: '{SUFFIX}')")
 
     valid = load_all_valid()
 
@@ -135,6 +164,11 @@ def main():
     matched = merged["bleu_participant"].notna().sum()
     print(f"  Merged BLEU: {matched}/{before} matched")
 
+    # drop_nowc ablation: remove the raw word_count length feature.
+    if EXCLUDE_WC and "word_count" in merged.columns:
+        merged = merged.drop(columns=["word_count"])
+        print("  Excluded word_count from feature matrix (drop_nowc variant)")
+
     id_cols = ["JournalUniqueID", "ParticipantID", "final_label"]
     feature_cols = sorted(c for c in merged.columns if c not in id_cols)
     merged = merged[id_cols + feature_cols]
@@ -143,7 +177,7 @@ def main():
     n_missing = merged[feature_cols].isna().sum().sum()
     n_cells = len(merged) * n_features
 
-    out_path = REVIEWS_OUTPUT / "meta_features_full.csv"
+    out_path = REVIEWS_OUTPUT / f"meta_features_full{SUFFIX}.csv"
     merged.to_csv(out_path, index=False)
 
     print(f"\n{'=' * 50}")

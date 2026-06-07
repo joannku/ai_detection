@@ -29,14 +29,26 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 
+# Feature-set variant: "orig" | "sw" | "drop" | "drop_nowc". Selects both merged matrices
+# (high-confidence + full) and suffixes the results/summary outputs.
+VARIANT = "drop"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+
+
+def variant_name(filename: str) -> str:
+    """Insert the variant SUFFIX before a filename's extension."""
+    stem, dot, ext = filename.rpartition(".")
+    return f"{stem}{SUFFIX}.{ext}" if dot else f"{filename}{SUFFIX}"
+
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-META_FEATURES_CSV = _REPO_ROOT / "output" / "merge_features" / "meta_features.csv"
-META_FEATURES_FULL_CSV = _REPO_ROOT / "output" / "merge_features_full" / "meta_features_full.csv"
+META_FEATURES_CSV = _REPO_ROOT / "output" / "merge_features" / f"meta_features{SUFFIX}.csv"
+META_FEATURES_FULL_CSV = _REPO_ROOT / "output" / "merge_features_full" / f"meta_features_full{SUFFIX}.csv"
 REVIEWS_OUTPUT = _REPO_ROOT / "output" / "permutation_test"
 REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
 SEED = 42
 N_PERMUTATIONS = 50
-DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "bleu_participant"]
+DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "nli_segmentation", "bleu_participant"]
 
 
 def load(path):
@@ -144,12 +156,13 @@ def run(df_path, label):
 
 def main():
     REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
+    print(f"Variant: {VARIANT}  ->  reading {META_FEATURES_CSV.name} + {META_FEATURES_FULL_CSV.name}")
     all_rows = []
     all_rows.extend(run(META_FEATURES_CSV, "high_confidence"))
     all_rows.extend(run(META_FEATURES_FULL_CSV, "full"))
 
     df = pd.DataFrame(all_rows)
-    out_csv = REVIEWS_OUTPUT / "permutation_test_results.csv"
+    out_csv = REVIEWS_OUTPUT / variant_name("permutation_test_results.csv")
     df.to_csv(out_csv, index=False)
     print(f"\nSaved raw results → {out_csv}")
 
@@ -170,7 +183,7 @@ def main():
         summary.append("")
 
     txt = "\n".join(summary)
-    out_txt = REVIEWS_OUTPUT / "permutation_test_summary.txt"
+    out_txt = REVIEWS_OUTPUT / variant_name("permutation_test_summary.txt")
     out_txt.write_text(txt)
     print()
     print(txt)

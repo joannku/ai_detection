@@ -32,15 +32,28 @@ from sklearn.pipeline import Pipeline
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 from sklearn.tree import _export as _sk_tree_export
 
+# Feature-set variant: "orig" | "sw" | "drop" | "drop_nowc". Selects the merged matrix and
+# the suffix added to every output. The paper figure copy only happens for the
+# canonical "orig" variant so sw/drop runs never clobber the published figure.
+VARIANT = "drop"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+
+
+def variant_name(filename: str) -> str:
+    """Insert the variant SUFFIX before a filename's extension."""
+    stem, dot, ext = filename.rpartition(".")
+    return f"{stem}{SUFFIX}.{ext}" if dot else f"{filename}{SUFFIX}"
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-META_FEATURES_CSV = REPO_ROOT / "output" / "merge_features" / "meta_features.csv"
+META_FEATURES_CSV = REPO_ROOT / "output" / "merge_features" / f"meta_features{SUFFIX}.csv"
 REVIEWS_OUTPUT = REPO_ROOT / "output" / "plot_decision_tree"
 REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
 PAPER_FIGS = REPO_ROOT / "overleaf_paper" / "figures"
 
 SEED = 42
 INNER_CV_FOLDS = 3
-DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "bleu_participant"]
+DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "nli_segmentation", "bleu_participant"]
 # `DISPLAY_DEPTH = None` shows every (post-pruned) node of the fitted
 # tree.  Same-class sibling-leaf pairs are collapsed by
 # `collapse_redundant_splits` after fitting, leaving only splits that
@@ -281,15 +294,18 @@ def render(pipe, feature_cols):
                 bottom = (full_depth - DISPLAY_DEPTH - 0.4) / (full_depth + 1)
                 ax.set_ylim(bottom, 1.02)
 
-        out = REVIEWS_OUTPUT / "decision_tree.png"
+        out = REVIEWS_OUTPUT / variant_name("decision_tree.png")
         fig.subplots_adjust(left=0.005, right=0.995, top=1.0, bottom=0.0)
         fig.savefig(out, dpi=300, facecolor="white", bbox_inches="tight",
                     pad_inches=0.15)
         plt.close(fig)
         print(f"Saved → {out}")
 
-    paper_out = PAPER_FIGS / "decision_tree.png"
-    if PAPER_FIGS.exists():
+    # Only the canonical "orig" variant is mirrored into the paper figures.
+    if SUFFIX:
+        print(f"Variant '{VARIANT}': skipping paper-figure copy")
+    elif PAPER_FIGS.exists():
+        paper_out = PAPER_FIGS / "decision_tree.png"
         shutil.copyfile(out, paper_out)
         print(f"Copied → {paper_out}")
     else:
@@ -297,6 +313,7 @@ def render(pipe, feature_cols):
 
 
 def main():
+    print(f"Variant: {VARIANT}  ->  reading {META_FEATURES_CSV.name}")
     X, y, groups, feat_cols = load()
     pipe = fit_tree(X, y, groups)
 
@@ -313,7 +330,7 @@ def main():
         feature_names=[humanise(c) for c in feat_cols],
         max_depth=10,
     )
-    rules_path = REVIEWS_OUTPUT / "meta_tree_rules.txt"
+    rules_path = REVIEWS_OUTPUT / variant_name("meta_tree_rules.txt")
     rules_path.write_text(
         "Post-pruned decision tree (same-class sibling-leaf pairs collapsed)\n"
         "===================================================================\n\n"

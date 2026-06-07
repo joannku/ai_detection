@@ -5,8 +5,22 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT_DIR / 'output' / 'analyze_features'
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-FEATURES_CSV = ROOT_DIR / 'output' / 'generate_features' / 'features.csv'
-PVALS_CSV = OUTPUT_DIR / 'pvals.csv'
+
+# Feature-set variant: "orig" | "sw" | "drop" | "drop_nowc". Selects which
+# per-entry features CSV is analysed and suffixes the p-values output. The
+# variant CSVs use suffixed metric names (coherence_sw, ...) and a lowercase
+# `final_label` column, both of which are normalised in main() so the rest of
+# the logic and get_feature_stats() are unchanged. "drop_nowc" reuses the
+# "drop" inputs but excludes word_count from the analysed metrics.
+VARIANT = "drop"
+
+_DATA_VARIANT = "drop" if VARIANT == "drop_nowc" else VARIANT
+DATA_SUFFIX = "" if _DATA_VARIANT == "orig" else f"_{_DATA_VARIANT}"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+EXCLUDE_WC = VARIANT == "drop_nowc"
+
+FEATURES_CSV = ROOT_DIR / 'output' / f'generate_features{DATA_SUFFIX}' / f'features{DATA_SUFFIX}.csv'
+PVALS_CSV = OUTPUT_DIR / f'pvals{SUFFIX}.csv'
 
 
 def get_feature_stats() -> dict:
@@ -52,12 +66,24 @@ def permutation_p_value(group_a: np.ndarray, group_b: np.ndarray, seed: int = 42
 def main() -> None:
     df = pd.read_csv(FEATURES_CSV)
 
+    # Normalise the sliding-window / drop variants back to the original schema:
+    #   - suffixed metric names (coherence_sw, ...) -> canonical names
+    #   - lowercase `final_label` (ai/human) -> `label` (AI/Human)
+    df = df.rename(columns={
+        f"coherence{DATA_SUFFIX}": "coherence",
+        f"style_similarity{DATA_SUFFIX}": "style_similarity",
+    })
+    if 'label' not in df.columns and 'final_label' in df.columns:
+        df['label'] = df['final_label'].map({'ai': 'AI', 'human': 'Human'})
+
     # Expect a 'label' column with values 'Human'/'AI'
     if 'label' not in df.columns:
         raise ValueError("features.csv must include a 'label' column for comparisons")
 
     # Identify numeric columns to test (exclude id/label-like columns)
     exclude_cols = {"JournalUniqueID", "label"}
+    if EXCLUDE_WC:
+        exclude_cols.add("word_count")  # drop_nowc ablation
     numeric_cols = [c for c in df.columns if c not in exclude_cols and pd.api.types.is_numeric_dtype(df[c])]
 
     results = []
@@ -91,7 +117,7 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     res_df = pd.DataFrame(results)
-    out_path = OUTPUT_DIR / 'pvals.csv'
+    out_path = PVALS_CSV
     res_df.to_csv(out_path, index=False)
     # Print semantic feature means for quick preview on slides
     def _fmt(x: float) -> str:

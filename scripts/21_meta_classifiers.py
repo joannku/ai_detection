@@ -77,9 +77,31 @@ except ImportError:
     HAS_XGB = False
     print("WARNING: xgboost not installed - skipping XGBoost model")
 
+# Feature-set variant ------------------------------------------------------
+# Selects which merged meta-feature matrix is read and the suffix added to
+# every output file. Set this once at the top of the file (no CLI args, so the
+# script stays runnable cell-by-cell).
+#   "orig"      -> meta_features.csv           (original metrics)
+#   "sw"        -> meta_features_sw.csv         (sliding-window metrics)
+#   "drop"      -> meta_features_drop.csv       (short entries dropped)
+#   "drop_nowc" -> meta_features_drop_nowc.csv  (drop + word_count removed)
+VARIANT = "drop"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+
+
+def variant_name(filename: str) -> str:
+    """Insert the variant SUFFIX before a filename's extension.
+
+    e.g. with VARIANT="sw": "meta_cv_results.csv" -> "meta_cv_results_sw.csv".
+    With VARIANT="orig" the filename is returned unchanged.
+    """
+    stem, dot, ext = filename.rpartition(".")
+    return f"{stem}{SUFFIX}.{ext}" if dot else f"{filename}{SUFFIX}"
+
+
 # Project paths -------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parent.parent
-META_FEATURES_CSV = REPO_ROOT / "output" / "merge_features" / "meta_features.csv"
+META_FEATURES_CSV = REPO_ROOT / "output" / "merge_features" / f"meta_features{SUFFIX}.csv"
 OUTPUT_DIR = REPO_ROOT / "output" / "meta_classifiers"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -100,7 +122,7 @@ SCORING = {
 # Features we never train on (they are bookkeeping / metadata):
 #   nli_n_sentences / nli_n_pairs - correlate r > 0.88 with sentence_count
 #   bleu_participant              - participant-level, not entry-level signal
-DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "bleu_participant"]
+DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "nli_segmentation", "bleu_participant"]
 
 # Containers populated by the per-model cells. Keyed by model display name
 # (for cv results) or short suffix (for SHAP / pipelines), so individual
@@ -369,7 +391,7 @@ def plot_decision_tree(pipeline: Pipeline, feature_cols: list[str]) -> None:
         ax=ax, proportion=True, impurity=False,
     )
     plt.tight_layout()
-    out = OUTPUT_DIR / "decision_tree.png"
+    out = OUTPUT_DIR / variant_name("decision_tree.png")
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved tree diagram -> {out}")
@@ -420,7 +442,7 @@ def compute_shap(name: str, pipeline: Pipeline, X: pd.DataFrame,
 
     # Save per-entry SHAP table.
     pd.DataFrame(shap_values, columns=feature_cols).to_csv(
-        OUTPUT_DIR / f"shap_values_{name}.csv", index=False,
+        OUTPUT_DIR / variant_name(f"shap_values_{name}.csv"), index=False,
     )
 
     # Mean |SHAP| per feature -> single-column importance frame.
@@ -436,7 +458,7 @@ def compute_shap(name: str, pipeline: Pipeline, X: pd.DataFrame,
         show=False, max_display=20,
     )
     plt.tight_layout()
-    out = OUTPUT_DIR / f"shap_summary_{name}.png"
+    out = OUTPUT_DIR / variant_name(f"shap_summary_{name}.png")
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved SHAP summary -> {out}")
@@ -446,6 +468,7 @@ def compute_shap(name: str, pipeline: Pipeline, X: pd.DataFrame,
 
 # %% Load data + define outer CV
 # Run this cell once, then any of the per-model cells below.
+print(f"Variant: {VARIANT}  ->  reading {META_FEATURES_CSV.name}")
 X, y, groups, feature_cols = load_data()
 outer_cv = StratifiedGroupKFold(n_splits=OUTER_CV_FOLDS)
 
@@ -470,7 +493,7 @@ final_pipelines["lasso"] = lasso_pipe
 
 # Save the coefficient table that 5results.tex (line ~242) cites.
 coeffs_df = extract_lasso_coeffs(lasso_pipe, feature_cols)
-coeffs_df.to_csv(OUTPUT_DIR / "meta_lasso_coeffs.csv", index=False)
+coeffs_df.to_csv(OUTPUT_DIR / variant_name("meta_lasso_coeffs.csv"), index=False)
 
 # SHAP for cross-model importance comparison.
 all_importance["lasso"] = compute_shap("lasso", lasso_pipe, X, feature_cols)
@@ -496,8 +519,8 @@ final_pipelines["tree"] = tree_pipe
 
 # Save the rules and a depth-3 diagram.
 rules = extract_tree_rules(tree_pipe, feature_cols)
-(OUTPUT_DIR / "meta_tree_rules.txt").write_text(rules)
-print("  Saved tree rules -> meta_tree_rules.txt")
+(OUTPUT_DIR / variant_name("meta_tree_rules.txt")).write_text(rules)
+print(f"  Saved tree rules -> {variant_name('meta_tree_rules.txt')}")
 print(f"\n  Tree rules (depth <= 5):\n{rules[:2000]}")
 plot_decision_tree(tree_pipe, feature_cols)
 
@@ -527,7 +550,7 @@ final_pipelines["rf"] = rf_pipe
 # Built-in feature_importances_ (Gini): saved separately so we can write
 # the Results paragraph about RF without having to re-derive importances.
 rf_importances = extract_ensemble_importances(rf_pipe, feature_cols, "Random Forest")
-rf_importances.to_csv(OUTPUT_DIR / "meta_rf_feature_importance.csv", index=False)
+rf_importances.to_csv(OUTPUT_DIR / variant_name("meta_rf_feature_importance.csv"), index=False)
 
 all_importance["rf"] = compute_shap("rf", rf_pipe, X, feature_cols)
 
@@ -561,7 +584,7 @@ if HAS_XGB:
     # Built-in feature_importances_ (gain): saved separately for the
     # XGBoost paragraph in the Results section.
     xgb_importances = extract_ensemble_importances(xgb_pipe, feature_cols, "XGBoost")
-    xgb_importances.to_csv(OUTPUT_DIR / "meta_xgb_feature_importance.csv", index=False)
+    xgb_importances.to_csv(OUTPUT_DIR / variant_name("meta_xgb_feature_importance.csv"), index=False)
 
     all_importance["xgb"] = compute_shap("xgb", xgb_pipe, X, feature_cols)
 
@@ -574,7 +597,7 @@ if HAS_XGB:
 cv_df = pd.DataFrame(
     [{"model": name, **summary} for name, summary in all_cv_results.items()]
 )
-cv_df.to_csv(OUTPUT_DIR / "meta_cv_results.csv", index=False)
+cv_df.to_csv(OUTPUT_DIR / variant_name("meta_cv_results.csv"), index=False)
 
 # Pretty-print the summary table with the precision the paper uses in
 # tab:meta_cv: AUC at 4 dp, the rest at 3 dp, all with mean +/- SD.
@@ -606,7 +629,7 @@ if all_importance:
         by=[c for c in importance_df.columns if c.startswith("shap_")],
         ascending=False,
     )
-    importance_df.to_csv(OUTPUT_DIR / "meta_feature_importance.csv", index=False)
+    importance_df.to_csv(OUTPUT_DIR / variant_name("meta_feature_importance.csv"), index=False)
 
 # Cross-model top-feature agreement: this is the actual reason we run
 # multiple models alongside the LASSO. If LASSO, RF, and XGBoost (with
@@ -614,17 +637,17 @@ if all_importance:
 # the convergence is evidence that those features are doing real work
 # rather than artefacts of any single model class.
 overlap_tables: dict[str, pd.DataFrame] = {}
-lasso_coef_path = OUTPUT_DIR / "meta_lasso_coeffs.csv"
+lasso_coef_path = OUTPUT_DIR / variant_name("meta_lasso_coeffs.csv")
 if lasso_coef_path.exists():
     lasso_coef = pd.read_csv(lasso_coef_path)
     # Match the column convention used elsewhere: feature, importance.
     overlap_tables["LASSO (|coef|)"] = lasso_coef[["feature", "abs_coeff"]].rename(
         columns={"abs_coeff": "importance"}
     )
-rf_imp_path = OUTPUT_DIR / "meta_rf_feature_importance.csv"
+rf_imp_path = OUTPUT_DIR / variant_name("meta_rf_feature_importance.csv")
 if rf_imp_path.exists():
     overlap_tables["Random Forest (Gini)"] = pd.read_csv(rf_imp_path)
-xgb_imp_path = OUTPUT_DIR / "meta_xgb_feature_importance.csv"
+xgb_imp_path = OUTPUT_DIR / variant_name("meta_xgb_feature_importance.csv")
 if xgb_imp_path.exists():
     overlap_tables["XGBoost (gain)"] = pd.read_csv(xgb_imp_path)
 if len(overlap_tables) >= 2:

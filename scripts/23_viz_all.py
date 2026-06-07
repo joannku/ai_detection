@@ -26,9 +26,22 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
+# Feature-set variant: "orig" | "sw" | "drop" | "drop_nowc". Selects the merged matrix and
+# the matching meta-classifier importances, and suffixes every output. Paper
+# figure copies happen only for the canonical "orig" variant.
+VARIANT = "drop"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+
+
+def variant_name(filename: str) -> str:
+    """Insert the variant SUFFIX before a filename's extension."""
+    stem, dot, ext = filename.rpartition(".")
+    return f"{stem}{SUFFIX}.{ext}" if dot else f"{filename}{SUFFIX}"
+
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-META_FEATURES_CSV = _REPO_ROOT / "output" / "merge_features" / "meta_features.csv"
-META_IMPORTANCE_CSV = _REPO_ROOT / "output" / "meta_classifiers" / "meta_feature_importance.csv"
+META_FEATURES_CSV = _REPO_ROOT / "output" / "merge_features" / f"meta_features{SUFFIX}.csv"
+META_IMPORTANCE_CSV = _REPO_ROOT / "output" / "meta_classifiers" / f"meta_feature_importance{SUFFIX}.csv"
 REVIEWS_OUTPUT = _REPO_ROOT / "output" / "viz_all"
 REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
 SEED = 42
@@ -235,7 +248,7 @@ def plot_violins(X, labels, feats=None):
         plt.tight_layout(pad=0.5, w_pad=1.0, h_pad=1.4,
                          rect=(0, 0, 1, 0.965))
 
-        out = REVIEWS_OUTPUT / "violin_distributions.png"
+        out = REVIEWS_OUTPUT / variant_name("violin_distributions.png")
         plt.savefig(out, dpi=200, bbox_inches="tight", facecolor="white",
                     pad_inches=0.1)
         plt.close()
@@ -282,7 +295,7 @@ def plot_boundary_pca(X, y, feature_cols):
     ax.legend(fontsize=10, loc="upper right")
 
     plt.tight_layout()
-    out = REVIEWS_OUTPUT / "decision_boundary_pca.png"
+    out = REVIEWS_OUTPUT / variant_name("decision_boundary_pca.png")
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved PCA boundary → {out}")
@@ -378,7 +391,7 @@ def plot_boundary_pairs(X, y):
                 handle.set_alpha(0.95)
                 handle.set_sizes([90])
 
-        out = REVIEWS_OUTPUT / "decision_boundary_pairs.png"
+        out = REVIEWS_OUTPUT / variant_name("decision_boundary_pairs.png")
         plt.savefig(out, dpi=200, bbox_inches="tight", facecolor="white",
                     pad_inches=0.1)
         plt.close()
@@ -504,15 +517,18 @@ def plot_shap_comparison(top_k: int = 15):
                        fontsize=TICK_FS, color="#1a1a1f")
         cbar.ax.tick_params(labelsize=TICK_FS - 1, colors="#3f3f44")
 
-        out = REVIEWS_OUTPUT / "shap_comparison.png"
+        out = REVIEWS_OUTPUT / variant_name("shap_comparison.png")
         plt.savefig(out, dpi=200, bbox_inches="tight",
                     facecolor="white", pad_inches=0.15)
         plt.close()
         print(f"  Saved SHAP comparison heatmap → {out}")
 
-        # Mirror to overleaf_paper/figures/ if the directory exists.
+        # Mirror to overleaf_paper/figures/ only for the canonical "orig"
+        # variant, so sw/drop runs never overwrite the published figures.
         paper_figs = _REPO_ROOT / "overleaf_paper" / "figures"
-        if paper_figs.exists():
+        if SUFFIX:
+            print(f"  Variant '{VARIANT}': skipping paper-figure copies")
+        elif paper_figs.exists():
             import shutil
             paper_out = paper_figs / "shap_comparison.png"
             shutil.copyfile(out, paper_out)
@@ -530,6 +546,7 @@ def plot_shap_comparison(top_k: int = 15):
 
 def main():
     REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
+    print(f"Variant: {VARIANT}  ->  reading {META_FEATURES_CSV.name}")
     X, y, labels, feature_cols = load_data()
 
     print("Generating visualizations...")

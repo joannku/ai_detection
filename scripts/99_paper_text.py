@@ -5,6 +5,28 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
+# Feature-set variant: "orig" | "sw" | "drop" | "drop_nowc". Controls which
+# variant-specific outputs the paper text is assembled from (NLI by-label means,
+# meta-classifier tables/coeffs, SVM, permutation test, decision-tree rules).
+# Variant-invariant sources (sample, IRR, demographics, BLEU, readability, LIWC)
+# are unaffected. Note: the coherence/style means come from
+# 12_analyze_features.py via import; set VARIANT there to match for a fully
+# consistent variant run.
+#
+# "drop_nowc" reuses the "drop" descriptive data (NLI / coherence / style means
+# are identical to "drop") but reads the distinct "_drop_nowc" model outputs.
+VARIANT = "drop"
+
+_DATA_VARIANT = "drop" if VARIANT == "drop_nowc" else VARIANT
+DATA_SUFFIX = "" if _DATA_VARIANT == "orig" else f"_{_DATA_VARIANT}"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+
+
+def variant_name(filename: str) -> str:
+    """Insert the variant SUFFIX before a filename's extension."""
+    stem, dot, ext = filename.rpartition(".")
+    return f"{stem}{SUFFIX}.{ext}" if dot else f"{filename}{SUFFIX}"
+
 liwc_labels = {
     "Bigwords": "Percentage of total words that are 7 letters or longer",
     "Dic": "Percent words captured by LIWC",
@@ -150,7 +172,8 @@ def format_nli_methods() -> str:
         r"The entry-level consistency score is defined as $1 - r_{\text{contradiction}}$,",
         r"where $r_{\text{contradiction}}$ is the fraction of sentence pairs classified",
         r"as contradictions. Higher scores indicate greater internal coherence;",
-        r"entries with fewer than two sentences were assigned a score of 1.0.",
+        r"entries with fewer than two qualifying sentences were excluded from "
+        r"rate summaries (undefined consistency).",
     ]
     return "\n".join(lines)
 
@@ -171,7 +194,8 @@ def format_readability_methods() -> str:
 
 def get_nli_stats() -> dict:
     """Load NLI consistency stats from CSV if available."""
-    nli_path = PROJECT_DIR / "output" / "nli_consistency" / "nli_consistency_by_label.csv"
+    nli_path = (PROJECT_DIR / "output" / f"nli_consistency{DATA_SUFFIX}"
+                / f"nli_consistency{DATA_SUFFIX}_by_label.csv")
     if not nli_path.exists():
         return {}
     import pandas as pd
@@ -438,7 +462,7 @@ def format_high_confidence_subset() -> str:
 
 def format_meta_classifier_table() -> str:
     """LaTeX table of cross-validated meta-classifier performance from 21_meta_classifiers.py."""
-    p = PROJECT_DIR / "output" / "meta_classifiers" / "meta_cv_results.csv"
+    p = PROJECT_DIR / "output" / "meta_classifiers" / variant_name("meta_cv_results.csv")
     if not p.exists():
         return "Meta-classifier results not available — run scripts/21_meta_classifiers.py."
     import pandas as pd
@@ -515,8 +539,8 @@ def format_meta_classifier_text() -> str:
     currently-fitted models.  The 6+4 split (top-6 AI features, top-4 human
     features) follows the exact prose layout used in `5results.tex`.
     """
-    cv_p = PROJECT_DIR / "output" / "meta_classifiers" / "meta_cv_results.csv"
-    coef_p = PROJECT_DIR / "output" / "meta_classifiers" / "meta_lasso_coeffs.csv"
+    cv_p = PROJECT_DIR / "output" / "meta_classifiers" / variant_name("meta_cv_results.csv")
+    coef_p = PROJECT_DIR / "output" / "meta_classifiers" / variant_name("meta_lasso_coeffs.csv")
     liwc_cv_p = (PROJECT_DIR / "output" / "analyze_liwc"
                  / "liwc_lasso_cv_words_only.csv")
     if not cv_p.exists() or not coef_p.exists():
@@ -573,7 +597,7 @@ def format_meta_classifier_text() -> str:
 
 def format_decision_tree_rules() -> str:
     """Post-pruned decision tree rules dump from 21_meta_classifiers.py."""
-    txt = _read_output_file("meta_classifiers/meta_tree_rules.txt")
+    txt = _read_output_file(f"meta_classifiers/{variant_name('meta_tree_rules.txt')}")
     if txt is None:
         return "Decision tree rules not available — run scripts/21_meta_classifiers.py."
     return txt
@@ -581,8 +605,8 @@ def format_decision_tree_rules() -> str:
 
 def format_svm_text() -> str:
     """Linear SVM CV scores + margin-flagging counts from 24_meta_svm.py (slot unchanged)."""
-    cv_p = PROJECT_DIR / "output" / "meta_svm" / "svm_cv_results.csv"
-    flags_p = PROJECT_DIR / "output" / "meta_svm" / "svm_margin_flags.csv"
+    cv_p = PROJECT_DIR / "output" / "meta_svm" / variant_name("svm_cv_results.csv")
+    flags_p = PROJECT_DIR / "output" / "meta_svm" / variant_name("svm_margin_flags.csv")
     if not cv_p.exists() or not flags_p.exists():
         return "SVM results not available — run scripts/24_meta_svm.py."
     import pandas as pd
@@ -603,7 +627,7 @@ def format_svm_text() -> str:
 
 def format_permutation_test() -> str:
     """Permutation-test summary from 26_permutation_test.py."""
-    txt = _read_output_file("permutation_test/permutation_test_summary.txt")
+    txt = _read_output_file(f"permutation_test/{variant_name('permutation_test_summary.txt')}")
     if txt is None:
         return "Permutation test results not available — run scripts/26_permutation_test.py."
     return txt
@@ -664,6 +688,7 @@ def format_shap_comparison_figure() -> str:
 def main():
     print("=" * 70)
     print("PAPER TEXT - Generated from processing pipeline outputs")
+    print(f"Feature-set variant: {VARIANT}")
     print("=" * 70)
     
     # Section 1: Sample Description
@@ -731,6 +756,10 @@ def main():
     print("-" * 70)
     try:
         analyze_features = importlib.import_module("12_analyze_features")
+        # Point the imported module at this run's variant p-values file so the
+        # coherence/style means match the rest of the variant outputs.
+        analyze_features.PVALS_CSV = (PROJECT_DIR / "output" / "analyze_features"
+                                      / variant_name("pvals.csv"))
         feature_stats = analyze_features.get_feature_stats()
         bleu_stats = get_bleu_stats()
         print(format_features_text(feature_stats, bleu_stats))

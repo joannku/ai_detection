@@ -1,98 +1,132 @@
 #!/usr/bin/env python3
-"""NLI-based consistency analysis: detect internal contradictions in entries.
+"""NLI consistency (canonical pipeline — drops <2-sentence entries).
 
-For every journal entry we split the text into sentences (filtering segments
-of <=10 characters), enumerate every pair of sentences, and classify each
-pair as `entailment`, `neutral`, or `contradiction` using BART-large-MNLI
-via zero-shot classification. From those per-pair labels we compute four
-entry-level rates:
+This is the main NLI-consistency script for the paper. It splits each entry into
+sentences (strict regex on terminal punctuation, dropping segments <=10 chars),
+classifies **all** sentence pairs with BART-large-MNLI, and reports
+consistency = 1 - contradiction_rate.
 
-  consistency_score = 1 - contradiction_rate
-  entailment_rate
-  contradiction_rate
-  neutral_rate
+Entries with fewer than two qualifying sentences cannot be scored the paper's
+way, so they are **dropped** (excluded): they get NaN for every rate and fall
+out of the group means. This is the conservative correction adopted as the
+project default — earlier 0-imputed and sliding-window variants are archived in
+``scripts/draft/``.
 
-Entries with fewer than two qualifying sentences receive default values
-(consistency = 1.0, contradiction = 0, entailment = 0, neutral = 1.0) --
-mirroring the convention described in the paper's methods.
+Outputs carry a ``_drop`` suffix everywhere (consumed by the meta-classifier
+scripts, which default to ``VARIANT = "drop"``):
 
-Outputs (under output/nli_consistency/):
-  nli_consistency.csv             one row per JournalUniqueID with the four rates
-  nli_consistency_by_label.csv    summary (mean/SD) per label
-  nli_cache_meta.json             manifest tying the above to the entry set
+  output/nli_consistency_drop/nli_consistency_drop.csv            per-entry rates
+  output/nli_consistency_drop/nli_consistency_drop_by_label.csv   per-label summary
+  output/nli_consistency_drop/nli_drop_cache_meta.json            cache manifest
+
+Per-entry columns:
+  consistency_score_drop  = 1 - contradiction_rate_drop   (NaN if <2 sentences)
+  contradiction_rate_drop
+  entailment_rate_drop
+  neutral_rate_drop
+  n_sentences             qualifying sentences found (strict splitter)
+  n_pairs                 sentence pairs classified (= C(n_sentences, 2))
 
 Running
 -------
-There are no CLI flags. The single switch is `RECOMPUTE` near the top of
-this file (or the `recompute=` kwarg of `main()`).
+Organised into ``#%%`` cells so it can be executed top-to-bottom interactively,
+or as a plain script:
 
-  * Run as a script  -> `python scripts/09_nli_consistency.py`
-  * Run in an interactive window -> `%run scripts/09_nli_consistency.py`,
-    or import and call `main()` / `main(recompute=True)`.
+    python scripts/09_nli_consistency.py            # incremental
+    # offline (model already cached):
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python scripts/09_nli_consistency.py
 
-Caching
--------
-NLI is slow (one pipeline call per sentence pair). The cache here is
-**per-entry incremental**: we read the existing nli_consistency.csv and
-only score entries whose `JournalUniqueID` is not already present. Adding
-a few new entries therefore costs only the new entries, not a full re-run.
-
-Setting RECOMPUTE = True (or passing recompute=True to main) forces every
-current entry to be re-scored, regardless of cache state.
-
-Paper paragraph cross-check
----------------------------
-After every run the script prints the numbers from §NLI consistency next
-to the paragraph claim, e.g.:
-
-  AI consistency        = 0.750 ± 0.279  (-> paragraph: '0.750 ± 0.279')
-  AI entailment rate    = 0.745          (-> paragraph: '75% of sentence pairs')
+Caching is per-entry incremental: entries already present in
+nli_consistency_drop.csv are skipped. Set ``RECOMPUTE = True`` to rescore all.
 """
 
+# %% ── Imports ──────────────────────────────────────────────────────────────
 from __future__ import annotations
 
 import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+# Heavyweight ML dependencies. Imported here (per project preference for
+# top-of-file imports) even though the model itself is still constructed lazily
+# in ``get_nli_pipeline`` so a pure cache-hit run stays fast.
+import torch
+from transformers import pipeline
 
-# ── Configuration ──────────────────────────────────────────────────────────
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+# %% ── Configuration ────────────────────────────────────────────────────────
+PROJECT_DIR = Path(__file__).resolve().parent.parent if "__file__" in globals() else Path.cwd()
 INPUT_DIR = PROJECT_DIR / "input"
 RATINGS_CSV = PROJECT_DIR / "ratings" / "all_ratings.csv"
-OUTPUT_DIR = PROJECT_DIR / "output" / "nli_consistency"
+OUTPUT_DIR = PROJECT_DIR / "output" / "nli_consistency_drop"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-ENTRY_CSV = OUTPUT_DIR / "nli_consistency.csv"
-SUMMARY_CSV = OUTPUT_DIR / "nli_consistency_by_label.csv"
-META_JSON = OUTPUT_DIR / "nli_cache_meta.json"
+ENTRY_CSV = OUTPUT_DIR / "nli_consistency_drop.csv"
+SUMMARY_CSV = OUTPUT_DIR / "nli_consistency_drop_by_label.csv"
+META_JSON = OUTPUT_DIR / "nli_drop_cache_meta.json"
+
+# Sentence-level filtering — matches the paper's described method exactly.
+# A "qualifying" sentence is a strict-split segment longer than this many chars.
+MIN_SENTENCE_CHARS = 10
 
 # Single switch:
-#   False -> incremental: score only entries not yet in nli_consistency.csv.
+#   False -> incremental: score only entries not yet in nli_consistency_drop.csv.
 #   True  -> always rescore every current entry from scratch (slow).
 RECOMPUTE: bool = False
 
-# Sentence-level filtering matches the paper's methods description.
-MIN_SENTENCE_CHARS = 10
+
+# %% ── Sentence splitting (strict — identical to the original 09) ───────────
+def split_sentences(text: str) -> list[str]:
+    """Split text into qualifying sentences (strict, paper-faithful).
+
+    Steps:
+        1. Reject empty / non-string input early (returns no sentences).
+        2. Split on terminal punctuation (``.!?``) that is followed by
+           whitespace — the original file's exact rule.
+        3. Keep only segments longer than ``MIN_SENTENCE_CHARS`` characters,
+           discarding trivial fragments the NLI model cannot reason about.
+
+    Note: this is deliberately strict (no lenient / newline fallback). Entries
+    that this cannot break into >=2 sentences are exactly the ones we drop.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return []
+
+    raw_segments = re.split(r"(?<=[.!?])\s+", text.strip())
+
+    sentences = []
+    for segment in raw_segments:
+        cleaned = segment.strip()
+        if len(cleaned) > MIN_SENTENCE_CHARS:
+            sentences.append(cleaned)
+    return sentences
 
 
-# ── NLI pipeline (lazy: model loads only on first use) ────────────────────
-
+# %% ── NLI pipeline (lazy: model loads only on first use) ───────────────────
 _nli_pipeline = None
+
+
+def _get_device():
+    """Pick the fastest available device for the NLI pipeline."""
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        print("\u2713 GPU detected: Apple Silicon (MPS)")
+        return "mps"
+    if torch.cuda.is_available():
+        print(f"\u2713 GPU detected: {torch.cuda.get_device_name(0)} (CUDA)")
+        return 0
+    print("\u26a0 No GPU detected, using CPU")
+    return -1
 
 
 def get_nli_pipeline():
     """Load the zero-shot NLI pipeline on first call, then memoise."""
     global _nli_pipeline
     if _nli_pipeline is None:
-        from transformers import pipeline
         device = _get_device()
         print("Loading NLI model (facebook/bart-large-mnli)...")
         _nli_pipeline = pipeline(
@@ -104,43 +138,26 @@ def get_nli_pipeline():
     return _nli_pipeline
 
 
-def _get_device():
-    """Pick the fastest available device for the NLI pipeline."""
-    try:
-        import torch
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            print("\u2713 GPU detected: Apple Silicon (MPS)")
-            return "mps"
-        if torch.cuda.is_available():
-            print(f"\u2713 GPU detected: {torch.cuda.get_device_name(0)} (CUDA)")
-            return 0
-        print("\u26a0 No GPU detected, using CPU")
-        return -1
-    except ImportError:
-        print("\u26a0 PyTorch not installed, using CPU")
-        return -1
-
-
-# ── Sentence splitting + per-entry NLI ────────────────────────────────────
-
-def split_sentences(text: str) -> list[str]:
-    """Split text into sentences, dropping fragments shorter than 10 characters."""
-    if not isinstance(text, str) or not text.strip():
-        return []
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    return [s.strip() for s in sentences if len(s.strip()) > MIN_SENTENCE_CHARS]
-
-
 def compute_nli_pair(premise: str, hypothesis: str) -> dict:
-    """Single sentence-pair classification: returns the top label + 3 scores."""
+    """Classify the relationship between two sentences with zero-shot NLI.
+
+    Identical to the original file (same labels / template) so per-pair behaviour
+    matches. Returns the winning label plus the score for each NLI label.
+    """
     nli = get_nli_pipeline()
+
+    # Zero-shot classification: score the hypothesis against each candidate
+    # label. ``hypothesis_template="{}"`` uses each label verbatim.
     result = nli(
         hypothesis,
         candidate_labels=["entailment", "neutral", "contradiction"],
         hypothesis_template="{}",
         multi_label=False,
     )
+
+    # Pair the best-first labels with their scores for order-independent lookup.
     label_scores = dict(zip(result["labels"], result["scores"]))
+
     return {
         "top_label": result["labels"][0],
         "entailment": label_scores.get("entailment", 0.0),
@@ -149,58 +166,78 @@ def compute_nli_pair(premise: str, hypothesis: str) -> dict:
     }
 
 
-def compute_entry_consistency(text: str) -> dict:
-    """Entry-level NLI rates over every pair of qualifying sentences.
+# %% ── Per-entry NLI over ALL sentence pairs ────────────────────────────────
+def compute_entry_consistency_drop(text: str) -> dict:
+    """Compute the four NLI rates for a single entry, dropping short entries.
 
-    For entries with <2 qualifying sentences we return the paper's documented
-    defaults: consistency = 1.0, contradiction = 0, entailment = 0,
-    neutral = 1.0. This mirrors the methods description in 4experiments.tex.
+    High-level idea:
+        Split the entry into qualifying sentences, then classify *every* pair of
+        sentences (not just neighbours) — this captures global logical
+        consistency across the whole entry, exactly as the paper does.
+
+    Drop rule (the only change vs the original metric):
+        An entry needs >=2 qualifying sentences to form a pair. Entries with
+        fewer are **dropped**: every rate is NaN (no imputation), so they are
+        excluded from the group means. ``n_sentences`` is still recorded so the
+        number of dropped entries can be audited.
     """
     sentences = split_sentences(text)
     n_sentences = len(sentences)
+
+    # Too few sentences to score the paper's way -> drop this entry (NaN).
     if n_sentences < 2:
         return {
-            "consistency_score": 1.0,
-            "contradiction_rate": 0.0,
-            "entailment_rate": 0.0,
-            "neutral_rate": 1.0,
+            "consistency_score_drop": np.nan,
+            "contradiction_rate_drop": np.nan,
+            "entailment_rate_drop": np.nan,
+            "neutral_rate_drop": np.nan,
             "n_sentences": n_sentences,
             "n_pairs": 0,
         }
 
+    # Classify every unordered pair of sentences (i < j).
     counts = {"entailment": 0, "neutral": 0, "contradiction": 0}
     n_pairs = 0
     for i in range(n_sentences):
         for j in range(i + 1, n_sentences):
-            n_pairs += 1
             try:
-                top = compute_nli_pair(sentences[i], sentences[j])["top_label"]
+                top_label = compute_nli_pair(sentences[i], sentences[j])["top_label"]
             except Exception:
-                top = "neutral"  # be conservative on transient pipeline errors
-            counts[top] += 1
+                # Be conservative on transient pipeline errors: count as neutral
+                # so one bad call cannot inflate the contradiction rate.
+                top_label = "neutral"
+            counts[top_label] += 1
+            n_pairs += 1
+
+    # Convert raw counts into proportions. consistency = 1 - contradiction rate.
+    contradiction_rate = counts["contradiction"] / n_pairs
+    entailment_rate = counts["entailment"] / n_pairs
+    neutral_rate = counts["neutral"] / n_pairs
 
     return {
-        "consistency_score": 1 - counts["contradiction"] / n_pairs,
-        "contradiction_rate": counts["contradiction"] / n_pairs,
-        "entailment_rate": counts["entailment"] / n_pairs,
-        "neutral_rate": counts["neutral"] / n_pairs,
+        "consistency_score_drop": 1 - contradiction_rate,
+        "contradiction_rate_drop": contradiction_rate,
+        "entailment_rate_drop": entailment_rate,
+        "neutral_rate_drop": neutral_rate,
         "n_sentences": n_sentences,
         "n_pairs": n_pairs,
     }
 
 
-# ── Loading ────────────────────────────────────────────────────────────────
-
+# %% ── Loading ──────────────────────────────────────────────────────────────
 def load_data() -> pd.DataFrame:
-    """Load journals + final labels, keep only valid AI/Human entries."""
+    """Load journals + final labels, keep only valid AI/Human entries.
+
+    Same scoping as the original 09 file and the ``_sw`` variant.
+    """
     journals = pd.read_csv(INPUT_DIR / "journals.csv", dtype=str)
     journals = journals.drop_duplicates(subset=["JournalUniqueID"])
 
     ratings = pd.read_csv(RATINGS_CSV)
     if "excluded_invalid_majority" in ratings.columns:
         excluded = (ratings["excluded_invalid_majority"]
-                      .astype(str).str.lower()
-                      .isin(["true", "1", "1.0"]))
+                    .astype(str).str.lower()
+                    .isin(["true", "1", "1.0"]))
         ratings = ratings[~excluded].copy()
     ratings = ratings[ratings["final_label"].isin(["ai", "human"])].copy()
 
@@ -208,10 +245,9 @@ def load_data() -> pd.DataFrame:
                 else "JournalContent")
     cols = ["JournalUniqueID", "ParticipantID", text_col]
     merged = (journals[cols]
-                .merge(ratings[["JournalUniqueID", "final_label"]],
-                       on="JournalUniqueID")
-                .rename(columns={text_col: "text"})
-                .dropna(subset=["text"]))
+              .merge(ratings[["JournalUniqueID", "final_label"]], on="JournalUniqueID")
+              .rename(columns={text_col: "text"})
+              .dropna(subset=["text"]))
     merged = merged[merged["text"].str.strip() != ""]
 
     n_ai = int((merged["final_label"] == "ai").sum())
@@ -220,28 +256,46 @@ def load_data() -> pd.DataFrame:
     return merged
 
 
-# ── Cache: tie outputs to the exact entry set ─────────────────────────────
+# %% ── Cache: tie outputs to the exact entry set ────────────────────────────
+def _sorted_ids_for_label(df: pd.DataFrame, label: str) -> list[str]:
+    """Return the sorted list of JournalUniqueIDs that carry ``label``.
+
+    Sorting makes the result order-independent so the hash below depends only on
+    *which* entries are present, not the order they arrived in.
+    """
+    rows_for_label = df[df["final_label"] == label]
+    ids = rows_for_label["JournalUniqueID"].astype(str).tolist()
+    return sorted(ids)
+
+
+def _hash_ids(ids: list[str]) -> str:
+    """Hash a list of IDs into a short fingerprint string.
+
+    Two runs over the exact same set of entries produce the same fingerprint;
+    adding or removing even one entry changes it, which is how the cache detects
+    a stale result.
+    """
+    joined = "\n".join(ids)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
 
 def cache_key(df: pd.DataFrame) -> dict:
-    """Manifest of the input set NLI was/will be computed on."""
-    def _hash(ids: list[str]) -> str:
-        return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()
+    """Build a manifest describing the exact input set + parameters used."""
+    ai_ids = _sorted_ids_for_label(df, "ai")
+    human_ids = _sorted_ids_for_label(df, "human")
 
-    ai_ids = sorted(df.loc[df["final_label"] == "ai", "JournalUniqueID"]
-                       .astype(str).tolist())
-    hu_ids = sorted(df.loc[df["final_label"] == "human", "JournalUniqueID"]
-                       .astype(str).tolist())
     return {
         "n_ai": len(ai_ids),
-        "n_human": len(hu_ids),
-        "ai_ids_hash": _hash(ai_ids),
-        "human_ids_hash": _hash(hu_ids),
+        "n_human": len(human_ids),
+        "ai_ids_hash": _hash_ids(ai_ids),
+        "human_ids_hash": _hash_ids(human_ids),
         "min_sentence_chars": MIN_SENTENCE_CHARS,
+        "strategy": "drop_entries_with_fewer_than_2_sentences",
     }
 
 
 def cached_ids(entry_csv: Path = ENTRY_CSV) -> set[str]:
-    """JournalUniqueIDs that already have NLI scores on disk."""
+    """JournalUniqueIDs that already have ``_drop`` scores on disk."""
     if not entry_csv.exists():
         return set()
     try:
@@ -262,17 +316,15 @@ def write_cache_meta(current_key: dict) -> None:
     META_JSON.write_text(json.dumps(current_key, indent=2))
 
 
-# ── Incremental processing ────────────────────────────────────────────────
-
+# %% ── Incremental processing ───────────────────────────────────────────────
 def process_entries(df_to_score: pd.DataFrame) -> pd.DataFrame:
-    """Score every entry in `df_to_score` for NLI consistency."""
+    """Score every entry in ``df_to_score`` for the drop-variant NLI rates."""
     if df_to_score.empty:
         return pd.DataFrame()
-    print(f"\nScoring NLI consistency for {len(df_to_score)} entries...")
+    print(f"\nScoring drop-variant NLI for {len(df_to_score)} entries...")
     rows: list[dict] = []
-    for _, row in tqdm(df_to_score.iterrows(),
-                       total=len(df_to_score), desc="NLI"):
-        metrics = compute_entry_consistency(row["text"])
+    for _, row in tqdm(df_to_score.iterrows(), total=len(df_to_score), desc="NLI_drop"):
+        metrics = compute_entry_consistency_drop(row["text"])
         rows.append({
             "JournalUniqueID": row["JournalUniqueID"],
             "final_label": row["final_label"],
@@ -282,145 +334,189 @@ def process_entries(df_to_score: pd.DataFrame) -> pd.DataFrame:
 
 
 def merge_with_existing(new_rows: pd.DataFrame) -> pd.DataFrame:
-    """Append `new_rows` to nli_consistency.csv, deduping on JournalUniqueID."""
-    if ENTRY_CSV.exists() and not new_rows.empty:
+    """Combine freshly scored rows with whatever is already on disk.
+
+    Three situations:
+        1. New rows AND a previous CSV exists -> concatenate, then keep the last
+           occurrence of each ID so newly scored rows win over stale ones.
+        2. No new rows but a CSV exists -> reload it unchanged.
+        3. No CSV yet -> the new rows are all we have.
+    """
+    have_prior_csv = ENTRY_CSV.exists()
+    have_new_rows = not new_rows.empty
+
+    if have_prior_csv and have_new_rows:
         prior = pd.read_csv(ENTRY_CSV)
-        combined = (pd.concat([prior, new_rows], ignore_index=True)
-                      .drop_duplicates("JournalUniqueID", keep="last"))
-    elif ENTRY_CSV.exists():
+        combined = pd.concat([prior, new_rows], ignore_index=True)
+        combined = combined.drop_duplicates("JournalUniqueID", keep="last")
+    elif have_prior_csv:
         combined = pd.read_csv(ENTRY_CSV)
     else:
         combined = new_rows
+
     combined.to_csv(ENTRY_CSV, index=False)
     return combined
 
 
+# %% ── Summary ──────────────────────────────────────────────────────────────
 def summarise_by_label(entries: pd.DataFrame) -> pd.DataFrame:
-    """Mean / SD over each (final_label) group; saved to nli_consistency_by_label.csv."""
+    """Mean / SD per (final_label) group; saved to *_by_label.csv.
+
+    Means use pandas' default skipna=True, so dropped (NaN) entries are excluded
+    rather than imputed — the whole point of this variant.
+    """
     rows = []
     for label in ("ai", "human"):
-        s = entries[entries["final_label"] == label]
-        if s.empty:
+        group = entries[entries["final_label"] == label]
+        if group.empty:
             continue
+
+        # An entry is "scored" if it had >=2 sentences (consistency not NaN).
+        # The rest are "excluded" (dropped, NaN) and left out of the means below.
+        is_scored = group["consistency_score_drop"].notna()
+        n_total = len(group)
+        n_scored = int(is_scored.sum())
+        n_excluded = n_total - n_scored
+
         rows.append({
             "label": label,
-            "n": len(s),
-            "consistency_mean":   float(s["consistency_score"].mean()),
-            "consistency_std":    float(s["consistency_score"].std()),
-            "contradiction_rate": float(s["contradiction_rate"].mean()),
-            "entailment_rate":    float(s["entailment_rate"].mean()),
-            "neutral_rate":       float(s["neutral_rate"].mean()),
-            "avg_sentences":      float(s["n_sentences"].mean()),
+            "n": n_total,
+            "n_scored": n_scored,
+            "n_excluded": n_excluded,
+            "consistency_mean":   float(group["consistency_score_drop"].mean()),
+            "consistency_std":    float(group["consistency_score_drop"].std()),
+            "contradiction_rate": float(group["contradiction_rate_drop"].mean()),
+            "entailment_rate":    float(group["entailment_rate_drop"].mean()),
+            "neutral_rate":       float(group["neutral_rate_drop"].mean()),
+            "avg_sentences":      float(group["n_sentences"].mean()),
         })
+
     summary = pd.DataFrame(rows)
     summary.to_csv(SUMMARY_CSV, index=False)
     return summary
 
 
-# ── Reporting ──────────────────────────────────────────────────────────────
-
+# %% ── Reporting ────────────────────────────────────────────────────────────
 def _print_header(title: str) -> None:
     print("\n" + "=" * 60 + f"\n{title}\n" + "=" * 60)
 
 
 def report_groups(summary: pd.DataFrame) -> None:
-    """Per-label NLI summary (mirrors the paper's reporting style)."""
-    _print_header("NLI consistency by label")
+    """Per-label drop-variant NLI summary."""
+    _print_header("Drop-variant NLI consistency by label")
     for _, r in summary.iterrows():
-        print(f"\n  {r['label'].upper()} (n={int(r['n'])}):")
-        print(f"    Consistency:        {r['consistency_mean']:.4f} "
-              f"\u00b1 {r['consistency_std']:.4f}")
+        print(f"\n  {r['label'].upper()} (n={int(r['n'])}, scored={int(r['n_scored'])}, "
+              f"excluded={int(r['n_excluded'])}):")
+        print(f"    Consistency:        {r['consistency_mean']:.4f} \u00b1 {r['consistency_std']:.4f}")
         print(f"    Contradiction rate: {r['contradiction_rate']:.4f}")
         print(f"    Entailment rate:    {r['entailment_rate']:.4f}")
         print(f"    Neutral rate:       {r['neutral_rate']:.4f}")
         print(f"    Avg sentences:      {r['avg_sentences']:.1f}")
 
 
-def report_paper_paragraph(summary: pd.DataFrame) -> None:
-    """Print every number used in §NLI consistency next to its paragraph role."""
-    if summary.empty:
+def report_gap(summary: pd.DataFrame) -> None:
+    """Print the AI-vs-Human gap and compare to the original published number.
+
+    The original (impute-1.0) consistency means were 0.750 (AI) vs 0.623 (Human),
+    a gap of +0.127; shown here for reference.
+    """
+    if summary.empty or not {"ai", "human"}.issubset(set(summary["label"])):
         return
-    by_label = summary.set_index("label")
-    if not {"ai", "human"}.issubset(by_label.index):
-        return
-    ai = by_label.loc["ai"]
-    hu = by_label.loc["human"]
+    by = summary.set_index("label")
+    ai, hu = by.loc["ai"], by.loc["human"]
 
-    _print_header("Paper paragraph cross-check")
-    print("Numbers used in '\u00a7NLI-based consistency analysis...':\n")
-    print(f"  AI consistency       = {ai['consistency_mean']:.3f} \u00b1 "
-          f"{ai['consistency_std']:.3f}  "
-          f"(\u2192 paragraph: '0.750 \u00b1 0.279')")
-    print(f"  Human consistency    = {hu['consistency_mean']:.3f} \u00b1 "
-          f"{hu['consistency_std']:.3f}  "
-          f"(\u2192 paragraph: '0.623 \u00b1 0.394')")
-    print(f"  AI entailment rate   = {ai['entailment_rate']:.3f}  "
-          f"(\u2192 paragraph: '75% of sentence pairs')")
-    print(f"  Human entailment     = {hu['entailment_rate']:.3f}  "
-          f"(feature_means table: '0.270')")
-    print(f"  AI contradiction     = {ai['contradiction_rate']:.3f}")
-    print(f"  Human contradiction  = {hu['contradiction_rate']:.3f}")
-    print(f"  AI neutral           = {ai['neutral_rate']:.3f}")
-    print(f"  Human neutral        = {hu['neutral_rate']:.3f}")
-    print(f"  AI avg sentences     = {ai['avg_sentences']:.1f}")
-    print(f"  Human avg sentences  = {hu['avg_sentences']:.1f}")
+    _print_header("AI vs Human (drop variant)")
+    print(f"  Consistency   AI={ai['consistency_mean']:.3f}  "
+          f"Human={hu['consistency_mean']:.3f}  "
+          f"gap={ai['consistency_mean'] - hu['consistency_mean']:+.3f}  "
+          f"(original impute gap: +0.127)")
+    print(f"  Entailment    AI={ai['entailment_rate']:.3f}  "
+          f"Human={hu['entailment_rate']:.3f}  "
+          f"gap={ai['entailment_rate'] - hu['entailment_rate']:+.3f}")
+    print(f"  Contradiction AI={ai['contradiction_rate']:.3f}  "
+          f"Human={hu['contradiction_rate']:.3f}  "
+          f"gap={ai['contradiction_rate'] - hu['contradiction_rate']:+.3f}")
 
 
-# ── Driver ─────────────────────────────────────────────────────────────────
+# %% ── Driver ───────────────────────────────────────────────────────────────
+def select_entries_to_score(df: pd.DataFrame, recompute: bool) -> pd.DataFrame:
+    """Decide which entries actually need (re)scoring and explain the decision.
 
-def main(recompute: bool = RECOMPUTE) -> None:
-    """Pipeline driver.
+    Returns the subset of ``df`` that should be sent to the (slow) NLI model.
+    The ``print`` calls narrate the cache state for a human watching the run.
 
-    Decides which entries (if any) need NLI scoring, runs only those,
-    refreshes the summary, prints group-level results and the paper-paragraph
-    cross-check. Pass `recompute=True` (or set the module-level constant
-    `RECOMPUTE` to True) to force re-scoring every current entry.
+    Three outcomes:
+        * recompute=True             -> score everything.
+        * nothing missing from cache -> score nothing (pure cache hit).
+        * some entries missing        -> score only the missing ones.
+    """
+    if recompute:
+        print("[cache] recompute=True requested; re-scoring every current entry.")
+        return df
+
+    already_scored, missing = coverage(df)
+
+    if not missing:
+        print(f"[cache] valid: all {len(already_scored):,} current entries already have _drop scores.")
+        print("[cache] skipping recomputation; reading from disk.")
+        return df.iloc[0:0]
+
+    if already_scored:
+        message = (f"[cache] partial: {len(already_scored):,} entries already scored, "
+                   f"{len(missing):,} new to score")
+
+        current_ids = set(df["JournalUniqueID"].astype(str))
+        stray_cached_ids = cached_ids() - current_ids if ENTRY_CSV.exists() else set()
+        if stray_cached_ids:
+            message += (f" (and {len(stray_cached_ids):,} cached entries no longer "
+                        "in current set, kept on disk)")
+        print(message + ".")
+    else:
+        print(f"[cache] empty; scoring all {len(missing):,} entries.")
+
+    needs_scoring = df["JournalUniqueID"].astype(str).isin(missing)
+    return df[needs_scoring]
+
+
+def main(recompute: bool = RECOMPUTE) -> pd.DataFrame:
+    """Pipeline driver (same control flow as ``09_nli_consistency_sw.py``).
+
+    Steps:
+        1. Load the scoped entry set and build a cache manifest for it.
+        2. Decide which entries need scoring (see ``select_entries_to_score``).
+        3. Score those, then merge them with anything already on disk.
+        4. Summarise per label over the *current* entry set only.
+        5. Persist the cache manifest and print the summary.
+
+    Returns the per-label summary DataFrame for convenience in interactive use.
     """
     df = load_data()
     current_key = cache_key(df)
 
-    if recompute:
-        print("[cache] recompute=True requested; re-scoring every current entry.")
-        to_score = df
-    else:
-        have, missing = coverage(df)
-        if not missing:
-            print(f"[cache] valid: all {len(have):,} current entries already "
-                  "have NLI scores on disk.")
-            print("[cache] skipping recomputation; reading from disk.")
-            to_score = df.iloc[0:0]   # empty
-        else:
-            extras = ENTRY_CSV.exists() and (cached_ids() - set(df["JournalUniqueID"].astype(str)))
-            if have:
-                msg = (f"[cache] partial: {len(have):,} entries already scored, "
-                       f"{len(missing):,} new to score")
-                if extras:
-                    msg += f" (and {len(extras):,} cached entries no longer in current set, kept on disk)"
-                print(msg + ".")
-            else:
-                print(f"[cache] empty; scoring all {len(missing):,} entries.")
-            to_score = df[df["JournalUniqueID"].astype(str).isin(missing)]
-
-    # Score whatever still needs scoring; merge with prior results on disk.
+    to_score = select_entries_to_score(df, recompute)
     new_rows = process_entries(to_score)
     all_entries = merge_with_existing(new_rows)
 
-    # Summary is computed over the CURRENT entry set only (not stray IDs that
-    # no longer belong, even though we keep them in the per-entry CSV).
+    # The on-disk CSV may contain stray IDs from older runs; restrict the summary
+    # to the entries that belong to the current dataset.
     current_ids = set(df["JournalUniqueID"].astype(str))
-    current_entries = all_entries[
-        all_entries["JournalUniqueID"].astype(str).isin(current_ids)
-    ]
+    is_current = all_entries["JournalUniqueID"].astype(str).isin(current_ids)
+    current_entries = all_entries[is_current]
+
     summary = summarise_by_label(current_entries)
     write_cache_meta(current_key)
 
     report_groups(summary)
-    report_paper_paragraph(summary)
+    report_gap(summary)
 
     print(f"\n\u2713 Per-entry results: {ENTRY_CSV}")
     print(f"\u2713 Per-label summary : {SUMMARY_CSV}")
     print(f"\u2713 Cache manifest    : {META_JSON}")
+    return summary
 
 
+# %% ── Run ──────────────────────────────────────────────────────────────────
+# Executable both as a script (`python scripts/09_nli_consistency_drop.py`) and
+# cell-by-cell (run the cells above, then this one).
 if __name__ == "__main__":
-    main()
+    summary = main()

@@ -38,8 +38,20 @@ from sklearn.decomposition import PCA
 from sklearn.calibration import CalibratedClassifierCV
 import shap
 
+# Feature-set variant: "orig" | "sw" | "drop" | "drop_nowc". Selects the merged matrix and
+# the matching combined meta-classifier outputs, and suffixes every output.
+VARIANT = "drop"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+
+
+def variant_name(filename: str) -> str:
+    """Insert the variant SUFFIX before a filename's extension."""
+    stem, dot, ext = filename.rpartition(".")
+    return f"{stem}{SUFFIX}.{ext}" if dot else f"{filename}{SUFFIX}"
+
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-META_FEATURES_CSV = _REPO_ROOT / "output" / "merge_features" / "meta_features.csv"
+META_FEATURES_CSV = _REPO_ROOT / "output" / "merge_features" / f"meta_features{SUFFIX}.csv"
 META_CLASSIFIERS_DIR = _REPO_ROOT / "output" / "meta_classifiers"
 REVIEWS_OUTPUT = _REPO_ROOT / "output" / "meta_svm"
 REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -54,7 +66,7 @@ SCORING = {
     "recall": "recall",
 }
 
-DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "bleu_participant"]
+DROP_FEATURES = ["nli_n_sentences", "nli_n_pairs", "nli_segmentation", "bleu_participant"]
 
 FEATURE_DISPLAY_NAMES = {
     "coherence": "Coherence",
@@ -234,13 +246,16 @@ def plot_margin_histogram(flags):
     ax.legend(fontsize=9)
 
     plt.tight_layout()
-    out = REVIEWS_OUTPUT / "svm_margin_histogram.png"
+    out = REVIEWS_OUTPUT / variant_name("svm_margin_histogram.png")
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved margin histogram → {out}")
 
+    # Only the canonical "orig" variant is mirrored into the paper figures.
     paper_figs = _REPO_ROOT / "overleaf_paper" / "figures"
-    if paper_figs.exists():
+    if SUFFIX:
+        print(f"  Variant '{VARIANT}': skipping paper-figure copy")
+    elif paper_figs.exists():
         import shutil
         dst = paper_figs / "svm_margin_histogram.png"
         shutil.copyfile(out, dst)
@@ -289,7 +304,7 @@ def plot_boundary_pca(pipeline, X, y, feature_cols):
     ax.legend(fontsize=10, loc="upper right")
 
     plt.tight_layout()
-    out = REVIEWS_OUTPUT / "svm_boundary_pca.png"
+    out = REVIEWS_OUTPUT / variant_name("svm_boundary_pca.png")
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved SVM PCA boundary → {out}")
@@ -351,7 +366,7 @@ def plot_boundary_pairs(X, y):
                  "Solid = boundary, dotted = margin",
                  fontsize=13, fontweight="bold")
     plt.tight_layout()
-    out = REVIEWS_OUTPUT / "svm_boundary_pairs.png"
+    out = REVIEWS_OUTPUT / variant_name("svm_boundary_pairs.png")
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved SVM pair boundaries → {out}")
@@ -376,7 +391,7 @@ def compute_shap(pipeline, X, feature_cols):
         shap_values = shap_values[:, :, 1]
 
     shap_df = pd.DataFrame(shap_values, columns=feature_cols)
-    shap_df.to_csv(REVIEWS_OUTPUT / "shap_values_svm.csv", index=False)
+    shap_df.to_csv(REVIEWS_OUTPUT / variant_name("shap_values_svm.csv"), index=False)
 
     mean_abs = shap_df.abs().mean().sort_values(ascending=False)
     importance_df = pd.DataFrame({
@@ -388,7 +403,7 @@ def compute_shap(pipeline, X, feature_cols):
     shap.summary_plot(shap_values, X_transformed, feature_names=feature_cols,
                       show=False, max_display=20)
     plt.tight_layout()
-    out = REVIEWS_OUTPUT / "shap_summary_svm.png"
+    out = REVIEWS_OUTPUT / variant_name("shap_summary_svm.png")
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved SHAP summary → {out}")
@@ -402,6 +417,7 @@ def compute_shap(pipeline, X, feature_cols):
 
 def main():
     REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
+    print(f"Variant: {VARIANT}  ->  reading {META_FEATURES_CSV.name}")
     df_full, X, y, groups, feature_cols = load_data()
     cv = StratifiedGroupKFold(n_splits=CV_FOLDS)
 
@@ -409,18 +425,18 @@ def main():
     pipeline, cv_results = train_and_evaluate(X, y, groups, cv)
 
     cv_df = pd.DataFrame([{"model": "Linear SVM", **cv_results}])
-    cv_df.to_csv(REVIEWS_OUTPUT / "svm_cv_results.csv", index=False)
-    print(f"\n  Saved CV results → svm_cv_results.csv")
+    cv_df.to_csv(REVIEWS_OUTPUT / variant_name("svm_cv_results.csv"), index=False)
+    print(f"\n  Saved CV results → {variant_name('svm_cv_results.csv')}")
 
     # Feature coefficients
     coeff_df = extract_coefficients(pipeline, feature_cols)
-    coeff_df.to_csv(REVIEWS_OUTPUT / "svm_coefficients.csv", index=False)
-    print(f"  Saved coefficients → svm_coefficients.csv")
+    coeff_df.to_csv(REVIEWS_OUTPUT / variant_name("svm_coefficients.csv"), index=False)
+    print(f"  Saved coefficients → {variant_name('svm_coefficients.csv')}")
 
     # Margin-based flagging
     flags = compute_margin_flags(pipeline, X, y, df_full)
-    flags.to_csv(REVIEWS_OUTPUT / "svm_margin_flags.csv", index=False)
-    print(f"  Saved margin flags → svm_margin_flags.csv")
+    flags.to_csv(REVIEWS_OUTPUT / variant_name("svm_margin_flags.csv"), index=False)
+    print(f"  Saved margin flags → {variant_name('svm_margin_flags.csv')}")
 
     # Visualizations
     print(f"\n{'='*60}")
@@ -435,11 +451,11 @@ def main():
     print("  SHAP Analysis")
     print(f"{'='*60}")
     shap_imp = compute_shap(pipeline, X, feature_cols)
-    shap_imp.to_csv(REVIEWS_OUTPUT / "svm_shap_importance.csv", index=False)
+    shap_imp.to_csv(REVIEWS_OUTPUT / variant_name("svm_shap_importance.csv"), index=False)
 
     # Append SVM SHAP to the combined feature importance file (lives next to
     # 21_meta_classifiers' outputs, since that script created the original file).
-    combined_path = META_CLASSIFIERS_DIR / "meta_feature_importance.csv"
+    combined_path = META_CLASSIFIERS_DIR / variant_name("meta_feature_importance.csv")
     if combined_path.exists():
         combined = pd.read_csv(combined_path)
         if "shap_svm" in combined.columns:
@@ -449,7 +465,7 @@ def main():
         print(f"  Updated combined feature importance with SVM SHAP")
 
     # Append to combined CV results (lives next to 21_meta_classifiers' outputs).
-    combined_cv_path = META_CLASSIFIERS_DIR / "meta_cv_results.csv"
+    combined_cv_path = META_CLASSIFIERS_DIR / variant_name("meta_cv_results.csv")
     if combined_cv_path.exists():
         existing = pd.read_csv(combined_cv_path)
         existing = existing[existing["model"] != "Linear SVM"]

@@ -21,6 +21,24 @@ ROOT = Path(__file__).resolve().parent.parent
 REVIEWS_OUTPUT = ROOT / "output" / "merge_features"
 REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
 
+# Feature-set variant. Controls which coherence/style + NLI inputs are read
+# and the suffix applied to the merged output. Only coherence, style
+# similarity and the NLI rates change between variants; LIWC, readability and
+# BLEU are identical across variants.
+#   "orig"      -> original adjacent-sentence metrics (0-imputed short entries)
+#   "sw"        -> sliding-window metrics
+#   "drop"      -> original metrics with <2-sentence entries dropped (NaN)
+#   "drop_nowc" -> same inputs as "drop" but the word_count column is removed
+#                  from the feature matrix (ablation of raw length signal)
+VARIANT = "drop"
+
+# "drop_nowc" reuses the "drop" per-entry inputs, so its *data* suffix is
+# "_drop" while its *output* suffix is the distinct "_drop_nowc".
+_DATA_VARIANT = "drop" if VARIANT == "drop_nowc" else VARIANT
+DATA_SUFFIX = "" if _DATA_VARIANT == "orig" else f"_{_DATA_VARIANT}"
+SUFFIX = "" if VARIANT == "orig" else f"_{VARIANT}"
+EXCLUDE_WC = VARIANT == "drop_nowc"
+
 LIWC_META_COLS = {"Row ID", "Segment"}
 
 # Exclude LIWC summary variables that use proprietary internal algorithms
@@ -41,19 +59,25 @@ def load_high_confidence():
 
 
 def load_coherence_style():
-    """Load per-entry coherence and style similarity from features.csv."""
-    path = ROOT / "output" / "generate_features" / "features.csv"
+    """Load per-entry coherence and style similarity from the (variant) features CSV."""
+    path = ROOT / "output" / f"generate_features{DATA_SUFFIX}" / f"features{DATA_SUFFIX}.csv"
     if not path.exists():
-        print("WARNING: features.csv not found — coherence & style similarity will be missing.")
-        print("  Run `python scripts/11_generate_features.py` first, then re-run this script.")
+        print(f"WARNING: {path.name} not found — coherence & style similarity will be missing.")
+        print(f"  Run `python scripts/11_generate_features{DATA_SUFFIX}.py` first, then re-run this script.")
         return None
 
     df = pd.read_csv(path)
     df = df.drop_duplicates(subset=["JournalUniqueID"], keep="first")
+    # Variant CSVs carry suffixed metric names (e.g. coherence_sw); normalise
+    # them back to canonical names so the merged matrix is variant-agnostic.
+    df = df.rename(columns={
+        f"coherence{DATA_SUFFIX}": "coherence",
+        f"style_similarity{DATA_SUFFIX}": "style_similarity",
+    })
     cols = ["JournalUniqueID", "coherence", "style_similarity",
             "word_count", "sentence_count", "character_count"]
     present = [c for c in cols if c in df.columns]
-    print(f"Coherence/style: loaded {len(df)} entries from features.csv")
+    print(f"Coherence/style: loaded {len(df)} entries from {path.name}")
     return df[present]
 
 
@@ -84,9 +108,22 @@ def load_readability():
 
 
 def load_nli():
-    path = ROOT / "output" / "nli_consistency" / "nli_consistency.csv"
+    path = ROOT / "output" / f"nli_consistency{DATA_SUFFIX}" / f"nli_consistency{DATA_SUFFIX}.csv"
     df = pd.read_csv(path)
     df = df.drop(columns=["final_label"], errors="ignore")
+    # Normalise variant column names back to the canonical schema so the merged
+    # matrix is identical across variants (only the values differ). The sliding
+    # window variant also renames its window-based bookkeeping columns so they
+    # land in the same DROP_FEATURES slots downstream.
+    rename_map = {
+        f"consistency_score{DATA_SUFFIX}": "consistency_score",
+        f"contradiction_rate{DATA_SUFFIX}": "contradiction_rate",
+        f"entailment_rate{DATA_SUFFIX}": "entailment_rate",
+        f"neutral_rate{DATA_SUFFIX}": "neutral_rate",
+        "n_windows": "n_sentences",
+        "n_adj_pairs": "n_pairs",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
     nli_cols = [c for c in df.columns if c not in ("JournalUniqueID",)]
     df = df.rename(columns={c: f"nli_{c}" for c in nli_cols})
     print(f"NLI consistency: {len(df)} entries, {len(nli_cols)} features")
@@ -105,6 +142,7 @@ def load_bleu():
 
 def main():
     REVIEWS_OUTPUT.mkdir(parents=True, exist_ok=True)
+    print(f"Variant: {VARIANT} (output suffix: '{SUFFIX}')")
 
     hc = load_high_confidence()
     hc_ids = set(hc["JournalUniqueID"])
@@ -139,6 +177,11 @@ def main():
     matched = merged["bleu_participant"].notna().sum()
     print(f"  Merged BLEU: {matched}/{before} matched")
 
+    # drop_nowc ablation: remove the raw word_count length feature.
+    if EXCLUDE_WC and "word_count" in merged.columns:
+        merged = merged.drop(columns=["word_count"])
+        print("  Excluded word_count from feature matrix (drop_nowc variant)")
+
     # Move identifiers and label to the front
     id_cols = ["JournalUniqueID", "ParticipantID", "final_label"]
     feature_cols = sorted(c for c in merged.columns if c not in id_cols)
@@ -148,7 +191,7 @@ def main():
     n_missing = merged[feature_cols].isna().sum().sum()
     n_cells = len(merged) * n_features
 
-    out_path = REVIEWS_OUTPUT / "meta_features.csv"
+    out_path = REVIEWS_OUTPUT / f"meta_features{SUFFIX}.csv"
     merged.to_csv(out_path, index=False)
 
     print(f"\n{'=' * 50}")
